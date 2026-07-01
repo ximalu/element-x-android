@@ -26,6 +26,7 @@ sealed interface WellknownRetrieverResult<out T> {
 
     fun dataOrNull(): T? = when (this) {
         is Success<T> -> data
+        is Outdated<T> -> data
         is Error -> null
         NotFound -> null
     }
