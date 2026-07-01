@@ -15,6 +15,11 @@ sealed interface WellknownRetrieverResult<out T> {
     data class Success<out T>(val data: T) : WellknownRetrieverResult<T>
 
     /**
+     * Well-known data has been retrieved from the local cache but is outdated and a manual refresh has been launched.
+     */
+    data class Outdated<out T>(val data: T) : WellknownRetrieverResult<T>
+
+    /**
      * Well-known data is not found (file does not exist server side, we got a 404).
      */
     data object NotFound : WellknownRetrieverResult<Nothing>
