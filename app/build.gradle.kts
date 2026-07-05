@@ -91,13 +91,13 @@ android {
     buildTypes {
         val oAuthRedirectSchemeBase = BuildTimeConfig.METADATA_HOST_REVERSED ?: "io.element.android"
         getByName("debug") {
-            resValue("string", "app_name", "$baseAppName dbg")
+            resValue("string", "app_name", "ExMod")
             resValue(
                 "string",
                 "login_redirect_scheme",
                 "$oAuthRedirectSchemeBase.debug",
             )
-            applicationIdSuffix = ".debug"
+            applicationIdSuffix = ".exmod"
             signingConfig = signingConfigs.getByName("debug")
         }
 
