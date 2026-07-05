@@ -13,14 +13,23 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.text.SpannedString
 import androidx.annotation.VisibleForTesting
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -29,12 +38,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import io.element.android.compound.theme.ElementTheme
 import io.element.android.compound.tokens.generated.CompoundIcons
 import io.element.android.features.messages.impl.timeline.components.layout.ContentAvoidingLayout
@@ -69,62 +81,159 @@ fun TimelineItemTextView(
         LocalContentColor provides ElementTheme.colors.textPrimary,
         LocalTextStyle provides textStyle
     ) {
-        val text = getTextWithResolvedMentions(content)
-        Box(modifier.semantics { contentDescription = content.plainText }) {
-            EditorStyledText(
-                text = text,
-                onLinkClickedListener = onLinkClick,
-                onLinkLongClickedListener = onLinkLongClick,
-                style = ElementRichTextEditorStyle.textStyle(),
-                onTextLayout = ContentAvoidingLayout.measureLegacyLastTextLine(onContentLayoutChange = onContentLayoutChange),
-                releaseOnDetach = false,
+        val hasCodeBlocks = remember(content) { content.htmlDocument?.select("pre > code")?.isNotEmpty() == true }
+        if (!hasCodeBlocks) {
+            // No code blocks — render as usual with full rich text
+            val text = getTextWithResolvedMentions(content)
+            Box(modifier.semantics { contentDescription = content.plainText }) {
+                EditorStyledText(
+                    text = text,
+                    onLinkClickedListener = onLinkClick,
+                    onLinkLongClickedListener = onLinkLongClick,
+                    style = ElementRichTextEditorStyle.textStyle(),
+                    onTextLayout = ContentAvoidingLayout.measureLegacyLastTextLine(onContentLayoutChange = onContentLayoutChange),
+                    releaseOnDetach = false,
+                )
+            }
+        } else {
+            // Has code blocks — render segments with per-block copy buttons
+            CodeBlockTimelineView(
+                content = content,
+                modifier = modifier,
             )
-            CodeBlockCopyButton(content = content)
+        }
+    }
+}
+
+// ─── Segmented Rendering ────────────────────────────────────────────
+
+/** A segment of the message content. */
+private sealed interface ContentSegment {
+    data class Text(val text: String) : ContentSegment
+    data class Code(val text: String, val language: String) : ContentSegment
+}
+
+@Composable
+private fun CodeBlockTimelineView(
+    content: TimelineItemTextBasedContent,
+    modifier: Modifier = Modifier,
+) {
+    val segments = remember(content) { segmentContent(content) }
+    Column(modifier = modifier.semantics { contentDescription = content.plainText }) {
+        for (segment in segments) {
+            when (segment) {
+                is ContentSegment.Text -> {
+                    if (segment.text.isNotBlank()) {
+                        Text(
+                            text = segment.text,
+                            style = LocalTextStyle.current,
+                            color = LocalContentColor.current,
+                        )
+                    }
+                }
+                is ContentSegment.Code -> {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    CodeBlockWidget(
+                        codeText = segment.text,
+                        language = segment.language,
+                    )
+                }
+            }
         }
     }
 }
 
 /**
- * Extracts the text from all `<pre><code>` blocks in the message.
+ * Splits the HTML body into alternating text and code segments,
+ * preserving the original order.
  */
-private fun extractCodeBlocks(content: TimelineItemTextBasedContent): List<String> {
-    val doc = content.htmlDocument ?: return emptyList()
-    val codeElements = doc.select("pre > code")
-    if (codeElements.isEmpty()) return emptyList()
-    return codeElements.map { it.text() }
+@VisibleForTesting
+internal fun segmentContent(content: TimelineItemTextBasedContent): List<ContentSegment> {
+    val doc = content.htmlDocument ?: return listOf(ContentSegment.Text(content.body))
+    val segments = mutableListOf<ContentSegment>()
+    for (child in doc.body().children()) {
+        if (child.tagName() == "pre") {
+            val codeElem = child.selectFirst("code")
+            if (codeElem != null) {
+                segments.add(
+                    ContentSegment.Code(
+                        text = org.jsoup.parser.Parser.unescapeEntities(codeElem.html(), false),
+                        language = codeElem.className().removePrefix("language-"),
+                    )
+                )
+            } else {
+                segments.add(ContentSegment.Text(child.text()))
+            }
+        } else {
+            segments.add(ContentSegment.Text(child.text()))
+        }
+    }
+    return segments
 }
 
-/**
- * A small copy button that appears on messages containing code blocks.
- * Tapping it copies all code block content to the clipboard.
- */
-@Composable
-private fun BoxScope.CodeBlockCopyButton(content: TimelineItemTextBasedContent) {
-    val codeTexts = remember(content) { extractCodeBlocks(content) }
-    if (codeTexts.isEmpty()) return
+// ─── Code Block Widget ──────────────────────────────────────────────
 
+@Composable
+private fun CodeBlockWidget(
+    codeText: String,
+    language: String,
+) {
     val context = LocalContext.current
     var copied by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(8.dp)
 
-    IconButton(
-        onClick = {
-            val text = codeTexts.joinToString("\n")
-            copyToClipboard(context, text)
-            copied = true
-        },
+    Column(
         modifier = Modifier
-            .align(Alignment.TopEnd)
-            .padding(2.dp)
-            .size(32.dp),
+            .fillMaxWidth()
+            .clip(shape)
+            .background(ElementTheme.colors.bgSubtleSecondary)
     ) {
-        Icon(
-            imageVector = CompoundIcons.Copy(),
-            contentDescription = if (copied) "Copied" else "Copy code",
-            tint = ElementTheme.colors.textSecondary,
-            modifier = Modifier.size(18.dp),
+        // Header: language label + copy button
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (language.isNotEmpty()) {
+                Text(
+                    text = language,
+                    style = ElementTheme.typography.fontBodySmRegular,
+                    color = ElementTheme.colors.textSecondary,
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            IconButton(
+                onClick = {
+                    copyToClipboard(context, codeText)
+                    copied = true
+                },
+                modifier = Modifier.size(28.dp),
+            ) {
+                Icon(
+                    imageVector = CompoundIcons.Copy(),
+                    contentDescription = if (copied) "已复制" else "复制代码",
+                    tint = ElementTheme.colors.textSecondary,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+        // Code content
+        Text(
+            text = codeText,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            lineHeight = 20.sp,
+            color = ElementTheme.colors.textPrimary,
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 8.dp),
         )
     }
 }
+
+// ─── Utilities ──────────────────────────────────────────────────────
 
 private fun copyToClipboard(context: Context, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -139,6 +248,8 @@ internal fun getTextWithResolvedMentions(content: TimelineItemTextBasedContent):
     val bodyWithResolvedMentions = mentionSpanUpdater.rememberMentionSpans(content.formattedBody)
     return SpannedString.valueOf(bodyWithResolvedMentions)
 }
+
+// ─── Previews ────────────────────────────────────────────────────────
 
 @PreviewsDayNight
 @Composable
