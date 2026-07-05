@@ -14,6 +14,7 @@ import android.content.Context
 import android.text.SpannedString
 import androidx.annotation.VisibleForTesting
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon
@@ -98,7 +99,7 @@ private fun extractCodeBlocks(content: TimelineItemTextBasedContent): List<Strin
  * Tapping it copies all code block content to the clipboard.
  */
 @Composable
-private fun CodeBlockCopyButton(content: TimelineItemTextBasedContent) {
+private fun BoxScope.CodeBlockCopyButton(content: TimelineItemTextBasedContent) {
     val codeTexts = remember(content) { extractCodeBlocks(content) }
     if (codeTexts.isEmpty()) return
 
