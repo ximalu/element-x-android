@@ -42,5 +42,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ExMod-release
-          path: app/build/outputs/apk/fdroid/release/*.apk
+          path: app/build/outputs/apk/fdroid/debug/*.apk
           if-no-files-found: error
