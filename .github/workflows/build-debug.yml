@@ -1,0 +1,43 @@
+name: Build Debug APK
+
+on:
+  workflow_dispatch:  # manual trigger only
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept licenses
+        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
+
+      - name: Install SDK 37
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0" 2>&1 | tail -5
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug -x lint -x detekt -x ktlintCheck --max-workers=2
+        env:
+          ORG_GRADLE_PROJECT_signing_element_nightly_storePassword: Secret
+          ORG_GRADLE_PROJECT_signing_element_nightly_keyId: Secret
+          ORG_GRADLE_PROJECT_signing_element_nightly_keyPassword: Secret
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: element-x-debug
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            **/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
