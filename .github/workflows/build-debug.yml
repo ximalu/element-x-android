@@ -27,7 +27,7 @@ jobs:
         run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0" 2>&1 | tail -5
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug -x lint -x detekt -x ktlintCheck --max-workers=2
+        run: ./gradlew assembleFdroidDebug -x lint -x detekt -x ktlintCheck --max-workers=2
         env:
           ORG_GRADLE_PROJECT_signing_element_nightly_storePassword: Secret
           ORG_GRADLE_PROJECT_signing_element_nightly_keyId: Secret
@@ -37,7 +37,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: element-x-debug
-          path: |
-            app/build/outputs/apk/debug/*.apk
-            **/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/fdroid/debug/*.apk
           if-no-files-found: error
