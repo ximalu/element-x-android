@@ -108,7 +108,7 @@ fun TimelineItemTextView(
 // ─── Segmented Rendering ────────────────────────────────────────────
 
 /** A segment of the message content. */
-private sealed interface ContentSegment {
+internal sealed interface ContentSegment {
     data class Text(val text: String) : ContentSegment
     data class Code(val text: String, val language: String) : ContentSegment
 }
