@@ -88,9 +88,18 @@ private object CustomHtmlToDomParser {
             "blockquote",
             "p",
             "br",
+            "table",
+            "thead",
+            "tbody",
+            "tr",
+            "th",
+            "td",
+            "caption",
             // Add custom `mx-reply` tag, even if it's just to remove its contents from the plain text version of the message
             "mx-reply"
         )
         .addAttributes("a", "href", "data-mention-type", "contenteditable")
         .addAttributes("ol", "start")
+        .addAttributes("th", "colspan", "rowspan")
+        .addAttributes("td", "colspan", "rowspan")
 }

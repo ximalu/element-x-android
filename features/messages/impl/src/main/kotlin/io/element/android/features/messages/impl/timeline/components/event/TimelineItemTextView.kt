@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -43,6 +44,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.dp
@@ -66,9 +68,10 @@ import io.element.android.wysiwyg.link.Link
 /**
  * Render a text message.
  *
- * If the message has `<pre><code>` blocks in its HTML, the content is split into
- * segments: text parts render with EditorStyledText (rich, clickable links, mentions),
- * code parts render as individually-copyable code blocks with the copy button ON the block.
+ * If the message has `<pre><code>` blocks OR `<table>` in its HTML,
+ * the content is split into segments and rendered with specialized widgets
+ * (code blocks with copy buttons, tables with proper layout).
+ * Otherwise, render with EditorStyledText (rich, clickable links, mentions).
  */
 @Composable
 fun TimelineItemTextView(
@@ -88,10 +91,11 @@ fun TimelineItemTextView(
         LocalContentColor provides ElementTheme.colors.textPrimary,
         LocalTextStyle provides textStyle
     ) {
-        // Check for code blocks
-        val codeBlocks = remember(content) { extractCodeBlocks(content) }
-        if (codeBlocks.isEmpty()) {
-            // ── No code blocks: render as usual ──
+        val needsSegmented = remember(content) {
+            hasCodeBlock(content) || hasTable(content)
+        }
+        if (!needsSegmented) {
+            // ── No special content: render as usual ──
             val text = getTextWithResolvedMentions(content)
             Box(modifier.semantics { contentDescription = content.plainText }) {
                 EditorStyledText(
@@ -104,10 +108,7 @@ fun TimelineItemTextView(
                 )
             }
         } else {
-            // ── Has code blocks: segmented rendering ──
-            // Use the htmlDocument to split into Text/Code segments
-            // Text segments: rendered with a simpler approach (EditorStyledText would require reformatting)
-            // Code segments: rendered as styled widgets with per-block copy buttons
+            // ── Has code blocks or tables: segmented rendering ──
             val segmentsResult = remember(content) {
                 runCatching { segmentContent(content) }
             }
@@ -134,43 +135,127 @@ fun TimelineItemTextView(
     }
 }
 
+// ─── Detection ──────────────────────────────────────────────────────
+
+private fun hasCodeBlock(content: TimelineItemTextBasedContent): Boolean {
+    val doc = content.htmlDocument ?: return false
+    return !doc.select("pre > code").isEmpty()
+}
+
+private fun hasTable(content: TimelineItemTextBasedContent): Boolean {
+    val doc = content.htmlDocument ?: return false
+    return !doc.select("table").isEmpty()
+}
+
 // ─── Segments ───────────────────────────────────────────────────────
 
 internal sealed interface Segment {
     data class Text(val body: String) : Segment
     data class Code(val body: String, val language: String) : Segment
+    data class Table(
+        val headers: List<TableHeader>,
+        val rows: List<TableRow>,
+    ) : Segment
 }
 
+data class TableHeader(val text: String, val colspan: Int = 1, val rowspan: Int = 1)
+data class TableRow(val cells: List<TableCell>)
+data class TableCell(val text: String, val colspan: Int = 1, val rowspan: Int = 1)
+
 /**
- * Split the HTML body into alternating text / code segments.
+ * Split the HTML body into alternating text / code / table segments.
  */
 @VisibleForTesting
 internal fun segmentContent(content: TimelineItemTextBasedContent): List<Segment> {
     val doc = content.htmlDocument ?: return listOf(Segment.Text(content.body))
     val out = mutableListOf<Segment>()
     for (child in doc.body().children()) {
-        if (child.tagName() == "pre") {
-            val code = child.selectFirst("code")
-            if (code != null) {
-                out.add(
-                    Segment.Code(
-                        body = org.jsoup.parser.Parser.unescapeEntities(code.html(), false),
-                        language = code.className().removePrefix("language-"),
+        when (child.tagName()) {
+            "pre" -> {
+                val code = child.selectFirst("code")
+                if (code != null) {
+                    out.add(
+                        Segment.Code(
+                            body = org.jsoup.parser.Parser.unescapeEntities(code.html(), false),
+                            language = code.className().removePrefix("language-"),
+                        )
                     )
-                )
-            } else {
+                } else {
+                    out.add(Segment.Text(child.text()))
+                }
+            }
+            "table" -> {
+                parseTable(child)?.let { out.add(it) }
+            }
+            else -> {
                 out.add(Segment.Text(child.text()))
             }
-        } else {
-            out.add(Segment.Text(child.text()))
         }
     }
     return out
 }
 
-/**
- * Render the segmented view: text → simple Text, code → styled block with copy button.
- */
+private fun parseTable(element: org.jsoup.nodes.Element): Segment.Table? {
+    val thead = element.selectFirst("thead")
+    val tbody = element.selectFirst("tbody")
+
+    val headers = if (thead != null) {
+        thead.select("tr th, tr td").map { cell ->
+            TableHeader(
+                text = cell.text(),
+                colspan = cell.attr("colspan").toIntOrNull() ?: 1,
+                rowspan = cell.attr("rowspan").toIntOrNull() ?: 1,
+            )
+        }
+    } else {
+        val firstRow = element.selectFirst("tr")
+        if (firstRow != null && firstRow.select("th").isNotEmpty()) {
+            firstRow.select("th, td").map { cell ->
+                TableHeader(
+                    text = cell.text(),
+                    colspan = cell.attr("colspan").toIntOrNull() ?: 1,
+                    rowspan = cell.attr("rowspan").toIntOrNull() ?: 1,
+                )
+            }
+        } else {
+            emptyList()
+        }
+    }
+
+    val dataRows = if (tbody != null) {
+        tbody.select("tr").map { row ->
+            TableRow(
+                cells = row.select("td, th").map { cell ->
+                    TableCell(
+                        text = cell.text(),
+                        colspan = cell.attr("colspan").toIntOrNull() ?: 1,
+                        rowspan = cell.attr("rowspan").toIntOrNull() ?: 1,
+                    )
+                }
+            )
+        }
+    } else {
+        val allRows = element.select("tr")
+        val start = if (headers.isNotEmpty()) 1 else 0
+        allRows.drop(start).map { row ->
+            TableRow(
+                cells = row.select("td, th").map { cell ->
+                    TableCell(
+                        text = cell.text(),
+                        colspan = cell.attr("colspan").toIntOrNull() ?: 1,
+                        rowspan = cell.attr("rowspan").toIntOrNull() ?: 1,
+                    )
+                }
+            )
+        }
+    }
+
+    if (headers.isEmpty() && dataRows.isEmpty()) return null
+    return Segment.Table(headers = headers, rows = dataRows)
+}
+
+// ─── Segmented View ─────────────────────────────────────────────────
+
 @Composable
 private fun SegmentedTimelineView(
     segments: List<Segment>,
@@ -193,6 +278,13 @@ private fun SegmentedTimelineView(
                     CodeBlockWidget(
                         codeText = segment.body,
                         language = segment.language,
+                    )
+                }
+                is Segment.Table -> {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TableWidget(
+                        headers = segment.headers,
+                        rows = segment.rows,
                     )
                 }
             }
@@ -247,7 +339,7 @@ private fun CodeBlockWidget(
                 )
             }
         }
-        // Code body
+        // Code body — with height cap to prevent nested verticalScroll crash
         Text(
             text = codeText,
             fontFamily = FontFamily.Monospace,
@@ -256,9 +348,75 @@ private fun CodeBlockWidget(
             color = ElementTheme.colors.textPrimary,
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(max = 300.dp)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         )
+    }
+}
+
+// ─── Table Widget ────────────────────────────────────────────────────
+
+@Composable
+private fun TableWidget(
+    headers: List<TableHeader>,
+    rows: List<TableRow>,
+) {
+    val borderColor = ElementTheme.colors.borderDisabled
+    val headerBg = ElementTheme.colors.bgSubtleSecondary
+    val shape = RoundedCornerShape(8.dp)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(ElementTheme.colors.bgCanvasDefault)
+    ) {
+        // Header row
+        if (headers.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(headerBg)
+            ) {
+                headers.forEach { header ->
+                    Text(
+                        text = header.text,
+                        style = ElementTheme.typography.fontBodyMdMedium,
+                        color = ElementTheme.colors.textPrimary,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(10.dp),
+                    )
+                }
+            }
+            Spacer(modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(borderColor))
+        }
+
+        // Data rows
+        rows.forEachIndexed { index, row ->
+            Row(modifier = Modifier.fillMaxWidth()) {
+                row.cells.forEach { cell ->
+                    Text(
+                        text = cell.text,
+                        style = ElementTheme.typography.fontBodyMdRegular,
+                        color = ElementTheme.colors.textPrimary,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(10.dp),
+                    )
+                }
+            }
+            if (index < rows.lastIndex) {
+                Spacer(modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(borderColor))
+            }
+        }
     }
 }
 
