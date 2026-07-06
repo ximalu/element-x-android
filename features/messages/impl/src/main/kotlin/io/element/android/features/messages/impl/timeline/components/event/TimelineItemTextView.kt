@@ -13,16 +13,21 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.text.SpannedString
 import androidx.annotation.VisibleForTesting
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -35,9 +40,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import io.element.android.compound.theme.ElementTheme
 import io.element.android.compound.tokens.generated.CompoundIcons
 import io.element.android.features.messages.impl.timeline.components.layout.ContentAvoidingLayout
@@ -53,6 +60,11 @@ import io.element.android.libraries.textcomposer.ElementRichTextEditorStyle
 import io.element.android.libraries.textcomposer.mentions.LocalMentionSpanUpdater
 import io.element.android.wysiwyg.compose.EditorStyledText
 import io.element.android.wysiwyg.link.Link
+
+private data class CodeBlockInfo(
+    val text: String,
+    val language: String,
+)
 
 @Composable
 fun TimelineItemTextView(
@@ -72,103 +84,115 @@ fun TimelineItemTextView(
         LocalContentColor provides ElementTheme.colors.textPrimary,
         LocalTextStyle provides textStyle
     ) {
-        val text = getTextWithResolvedMentions(content)
-        Box(modifier.semantics { contentDescription = content.plainText }) {
-            EditorStyledText(
-                text = text,
-                onLinkClickedListener = onLinkClick,
-                onLinkLongClickedListener = onLinkLongClick,
-                style = ElementRichTextEditorStyle.textStyle(),
-                onTextLayout = ContentAvoidingLayout.measureLegacyLastTextLine(onContentLayoutChange = onContentLayoutChange),
-                releaseOnDetach = false,
-            )
-            // Copy button for messages containing code blocks
-            val codeTexts = remember(content) { extractCodeBlockTexts(content) }
-            if (codeTexts.isNotEmpty()) {
-                CodeBlockCopyButton(codeTexts)
+        val codeBlocks = remember(content) { extractCodeBlocks(content) }
+        if (codeBlocks.isEmpty()) {
+            // Normal rendering — no code blocks
+            val text = getTextWithResolvedMentions(content)
+            Box(modifier.semantics { contentDescription = content.plainText }) {
+                EditorStyledText(
+                    text = text,
+                    onLinkClickedListener = onLinkClick,
+                    onLinkLongClickedListener = onLinkLongClick,
+                    style = ElementRichTextEditorStyle.textStyle(),
+                    onTextLayout = ContentAvoidingLayout.measureLegacyLastTextLine(onContentLayoutChange = onContentLayoutChange),
+                    releaseOnDetach = false,
+                )
             }
+        } else {
+            // Has code blocks — render full rich text, then per-block buttons below
+            val text = getTextWithResolvedMentions(content)
+            Box(modifier.semantics { contentDescription = content.plainText }) {
+                EditorStyledText(
+                    text = text,
+                    onLinkClickedListener = onLinkClick,
+                    onLinkLongClickedListener = onLinkLongClick,
+                    style = ElementRichTextEditorStyle.textStyle(),
+                    onTextLayout = ContentAvoidingLayout.measureLegacyLastTextLine(onContentLayoutChange = onContentLayoutChange),
+                    releaseOnDetach = false,
+                )
+            }
+            // Per-code-block copy buttons row
+            CodeBlockButtonsRow(codeBlocks)
         }
     }
 }
 
 /**
- * Extracts code block text from the HTML document, preserving whitespace and line breaks.
- * Returns a list of (text, language) pairs.
+ * A row of small copy buttons below messages with code blocks,
+ * one per code block.
+ */
+@Composable
+private fun CodeBlockButtonsRow(codeBlocks: List<CodeBlockInfo>) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp),
+    ) {
+        codeBlocks.forEachIndexed { index, block ->
+            CodeBlockChip(block = block, index = index)
+            if (index < codeBlocks.size - 1) {
+                Spacer(modifier = Modifier.width(6.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun CodeBlockChip(block: CodeBlockInfo, index: Int) {
+    val context = LocalContext.current
+    var copied by remember { mutableStateOf(false) }
+
+    val label = if (block.language.isNotEmpty()) {
+        block.language
+    } else {
+        "代码"
+    }
+
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = ElementTheme.colors.bgSubtleSecondary,
+        modifier = Modifier
+            .sizeIn(maxWidth = 120.dp)
+            .clickable {
+                copyToClipboard(context, block.text)
+                copied = true
+            },
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+        ) {
+            Icon(
+                imageVector = if (copied) CompoundIcons.Check() else CompoundIcons.Copy(),
+                contentDescription = null,
+                tint = ElementTheme.colors.textSecondary,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = label,
+                style = ElementTheme.typography.fontBodySmRegular,
+                color = ElementTheme.colors.textSecondary,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+/**
+ * Extracts code block text + language from the HTML document.
+ * Preserves whitespace and line breaks via html() instead of text().
  */
 @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-internal fun extractCodeBlockTexts(content: TimelineItemTextBasedContent): List<Pair<String, String>> {
+internal fun extractCodeBlocks(content: TimelineItemTextBasedContent): List<CodeBlockInfo> {
     val doc = content.htmlDocument ?: return emptyList()
     val codeElements = doc.select("pre > code")
     if (codeElements.isEmpty()) return emptyList()
     return codeElements.map { element ->
-        val text = org.jsoup.parser.Parser.unescapeEntities(element.html(), false)
-        val lang = element.className().removePrefix("language-")
-        text to lang
-    }
-}
-
-/**
- * A copy button shown on messages with code blocks.
- * If one block, copies directly. If multiple, shows a menu to pick.
- */
-@Composable
-private fun CodeBlockCopyButton(codeTexts: List<Pair<String, String>>) {
-    val context = LocalContext.current
-    var copied by remember { mutableStateOf(false) }
-    var menuExpanded by remember { mutableStateOf(false) }
-    val singleBlock = codeTexts.size == 1
-
-    IconButton(
-        onClick = {
-            if (singleBlock) {
-                copyToClipboard(context, codeTexts.first().first)
-                copied = true
-            } else {
-                menuExpanded = true
-            }
-        },
-        modifier = Modifier
-            .align(Alignment.TopEnd)
-            .padding(2.dp)
-            .size(32.dp),
-    ) {
-        Icon(
-            imageVector = CompoundIcons.Copy(),
-            contentDescription = if (copied) "Copied" else "Copy code",
-            tint = ElementTheme.colors.textSecondary,
-            modifier = Modifier.size(18.dp),
+        CodeBlockInfo(
+            text = org.jsoup.parser.Parser.unescapeEntities(element.html(), false),
+            language = element.className().removePrefix("language-"),
         )
-    }
-
-    if (codeTexts.size > 1) {
-        DropdownMenu(
-            expanded = menuExpanded,
-            onDismissRequest = { menuExpanded = false }
-        ) {
-            codeTexts.forEachIndexed { index, (text, lang) ->
-                val label = if (lang.isNotEmpty()) "复制 $lang" else "复制代码块 ${index + 1}"
-                DropdownMenuItem(
-                    text = { Text(label, style = ElementTheme.typography.fontBodyMdRegular) },
-                    onClick = {
-                        copyToClipboard(context, text)
-                        copied = true
-                        menuExpanded = false
-                    },
-                )
-            }
-            // Option to copy all
-            if (codeTexts.size > 1) {
-                DropdownMenuItem(
-                    text = { Text("复制全部", style = ElementTheme.typography.fontBodyMdRegular) },
-                    onClick = {
-                        val all = codeTexts.joinToString("\n\n") { it.first }
-                        copyToClipboard(context, all)
-                        copied = true
-                        menuExpanded = false
-                    },
-                )
-            }
-        }
     }
 }
 
