@@ -108,19 +108,16 @@ fun TimelineItemTextView(
             // Use the htmlDocument to split into Text/Code segments
             // Text segments: rendered with a simpler approach (EditorStyledText would require reformatting)
             // Code segments: rendered as styled widgets with per-block copy buttons
-            val segments = remember(content) { segmentContent(content) }
-            var hasError by remember { mutableStateOf(false) }
-            if (!hasError) {
-                try {
-                    SegmentedTimelineView(
-                        segments = segments,
-                        modifier = modifier,
-                    )
-                } catch (e: Exception) {
-                    hasError = true
-                }
+            val segmentsResult = remember(content) {
+                runCatching { segmentContent(content) }
             }
-            if (hasError) {
+            val safeSegments = segmentsResult.getOrNull()
+            if (safeSegments != null) {
+                SegmentedTimelineView(
+                    segments = safeSegments,
+                    modifier = modifier,
+                )
+            } else {
                 // Fallback: plain rendering
                 Box(modifier.semantics { contentDescription = content.plainText }) {
                     EditorStyledText(
