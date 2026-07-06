@@ -14,12 +14,16 @@ import android.content.Context
 import android.text.SpannedString
 import androidx.annotation.VisibleForTesting
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -89,34 +93,39 @@ fun TimelineItemTextView(
 
 /**
  * Extracts code block text from the HTML document, preserving whitespace and line breaks.
- * Uses html() instead of text() to keep indentation and newlines.
+ * Returns a list of (text, language) pairs.
  */
 @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-internal fun extractCodeBlockTexts(content: TimelineItemTextBasedContent): List<String> {
+internal fun extractCodeBlockTexts(content: TimelineItemTextBasedContent): List<Pair<String, String>> {
     val doc = content.htmlDocument ?: return emptyList()
     val codeElements = doc.select("pre > code")
     if (codeElements.isEmpty()) return emptyList()
     return codeElements.map { element ->
-        org.jsoup.parser.Parser.unescapeEntities(element.html(), false)
+        val text = org.jsoup.parser.Parser.unescapeEntities(element.html(), false)
+        val lang = element.className().removePrefix("language-")
+        text to lang
     }
 }
 
 /**
  * A copy button shown on messages with code blocks.
- * Copies all code block content to clipboard with proper formatting.
+ * If one block, copies directly. If multiple, shows a menu to pick.
  */
 @Composable
-private fun CodeBlockCopyButton(codeTexts: List<String>) {
+private fun CodeBlockCopyButton(codeTexts: List<Pair<String, String>>) {
     val context = LocalContext.current
     var copied by remember { mutableStateOf(false) }
+    var menuExpanded by remember { mutableStateOf(false) }
+    val singleBlock = codeTexts.size == 1
 
     IconButton(
         onClick = {
-            val text = codeTexts.joinToString("\n\n")
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            val clip = ClipData.newPlainText("code", text)
-            clipboard.setPrimaryClip(clip)
-            copied = true
+            if (singleBlock) {
+                copyToClipboard(context, codeTexts.first().first)
+                copied = true
+            } else {
+                menuExpanded = true
+            }
         },
         modifier = Modifier
             .align(Alignment.TopEnd)
@@ -130,6 +139,43 @@ private fun CodeBlockCopyButton(codeTexts: List<String>) {
             modifier = Modifier.size(18.dp),
         )
     }
+
+    if (codeTexts.size > 1) {
+        DropdownMenu(
+            expanded = menuExpanded,
+            onDismissRequest = { menuExpanded = false }
+        ) {
+            codeTexts.forEachIndexed { index, (text, lang) ->
+                val label = if (lang.isNotEmpty()) "复制 $lang" else "复制代码块 ${index + 1}"
+                DropdownMenuItem(
+                    text = { Text(label, style = ElementTheme.typography.fontBodyMdRegular) },
+                    onClick = {
+                        copyToClipboard(context, text)
+                        copied = true
+                        menuExpanded = false
+                    },
+                )
+            }
+            // Option to copy all
+            if (codeTexts.size > 1) {
+                DropdownMenuItem(
+                    text = { Text("复制全部", style = ElementTheme.typography.fontBodyMdRegular) },
+                    onClick = {
+                        val all = codeTexts.joinToString("\n\n") { it.first }
+                        copyToClipboard(context, all)
+                        copied = true
+                        menuExpanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+private fun copyToClipboard(context: Context, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    val clip = ClipData.newPlainText("code", text)
+    clipboard.setPrimaryClip(clip)
 }
 
 @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
