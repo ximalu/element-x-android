@@ -139,7 +139,7 @@ fun TimelineItemTextView(
 
 // ─── Segments ───────────────────────────────────────────────────────
 
-private sealed interface Segment {
+internal sealed interface Segment {
     data class Text(val body: String) : Segment
     data class Code(val body: String, val language: String) : Segment
 }
