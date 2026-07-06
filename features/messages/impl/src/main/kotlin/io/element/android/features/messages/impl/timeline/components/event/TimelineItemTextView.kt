@@ -267,7 +267,7 @@ private fun CodeBlockWidget(
 
 // ─── Utilities ──────────────────────────────────────────────────────
 
-private data class CodeBlockInfo(
+internal data class CodeBlockInfo(
     val text: String,
     val language: String,
 )
