@@ -13,21 +13,22 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.text.SpannedString
 import androidx.annotation.VisibleForTesting
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.sizeIn
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -37,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -61,11 +63,13 @@ import io.element.android.libraries.textcomposer.mentions.LocalMentionSpanUpdate
 import io.element.android.wysiwyg.compose.EditorStyledText
 import io.element.android.wysiwyg.link.Link
 
-private data class CodeBlockInfo(
-    val text: String,
-    val language: String,
-)
-
+/**
+ * Render a text message.
+ *
+ * If the message has `<pre><code>` blocks in its HTML, the content is split into
+ * segments: text parts render with EditorStyledText (rich, clickable links, mentions),
+ * code parts render as individually-copyable code blocks with the copy button ON the block.
+ */
 @Composable
 fun TimelineItemTextView(
     content: TimelineItemTextBasedContent,
@@ -84,9 +88,10 @@ fun TimelineItemTextView(
         LocalContentColor provides ElementTheme.colors.textPrimary,
         LocalTextStyle provides textStyle
     ) {
+        // Check for code blocks
         val codeBlocks = remember(content) { extractCodeBlocks(content) }
         if (codeBlocks.isEmpty()) {
-            // Normal rendering — no code blocks
+            // ── No code blocks: render as usual ──
             val text = getTextWithResolvedMentions(content)
             Box(modifier.semantics { contentDescription = content.plainText }) {
                 EditorStyledText(
@@ -99,91 +104,175 @@ fun TimelineItemTextView(
                 )
             }
         } else {
-            // Has code blocks — render full rich text, then per-block buttons below
-            val text = getTextWithResolvedMentions(content)
-            Box(modifier.semantics { contentDescription = content.plainText }) {
-                EditorStyledText(
-                    text = text,
-                    onLinkClickedListener = onLinkClick,
-                    onLinkLongClickedListener = onLinkLongClick,
-                    style = ElementRichTextEditorStyle.textStyle(),
-                    onTextLayout = ContentAvoidingLayout.measureLegacyLastTextLine(onContentLayoutChange = onContentLayoutChange),
-                    releaseOnDetach = false,
-                )
+            // ── Has code blocks: segmented rendering ──
+            // Use the htmlDocument to split into Text/Code segments
+            // Text segments: rendered with a simpler approach (EditorStyledText would require reformatting)
+            // Code segments: rendered as styled widgets with per-block copy buttons
+            val segments = remember(content) { segmentContent(content) }
+            var hasError by remember { mutableStateOf(false) }
+            if (!hasError) {
+                try {
+                    SegmentedTimelineView(
+                        segments = segments,
+                        modifier = modifier,
+                    )
+                } catch (e: Exception) {
+                    hasError = true
+                }
             }
-            // Per-code-block copy buttons row
-            CodeBlockButtonsRow(codeBlocks)
+            if (hasError) {
+                // Fallback: plain rendering
+                Box(modifier.semantics { contentDescription = content.plainText }) {
+                    EditorStyledText(
+                        text = getTextWithResolvedMentions(content),
+                        onLinkClickedListener = onLinkClick,
+                        onLinkLongClickedListener = onLinkLongClick,
+                        style = ElementRichTextEditorStyle.textStyle(),
+                        onTextLayout = ContentAvoidingLayout.measureLegacyLastTextLine(onContentLayoutChange = onContentLayoutChange),
+                        releaseOnDetach = false,
+                    )
+                }
+            }
         }
     }
+}
+
+// ─── Segments ───────────────────────────────────────────────────────
+
+private sealed interface Segment {
+    data class Text(val body: String) : Segment
+    data class Code(val body: String, val language: String) : Segment
 }
 
 /**
- * A row of small copy buttons below messages with code blocks,
- * one per code block.
+ * Split the HTML body into alternating text / code segments.
+ */
+@VisibleForTesting
+internal fun segmentContent(content: TimelineItemTextBasedContent): List<Segment> {
+    val doc = content.htmlDocument ?: return listOf(Segment.Text(content.body))
+    val out = mutableListOf<Segment>()
+    for (child in doc.body().children()) {
+        if (child.tagName() == "pre") {
+            val code = child.selectFirst("code")
+            if (code != null) {
+                out.add(
+                    Segment.Code(
+                        body = org.jsoup.parser.Parser.unescapeEntities(code.html(), false),
+                        language = code.className().removePrefix("language-"),
+                    )
+                )
+            } else {
+                out.add(Segment.Text(child.text()))
+            }
+        } else {
+            out.add(Segment.Text(child.text()))
+        }
+    }
+    return out
+}
+
+/**
+ * Render the segmented view: text → simple Text, code → styled block with copy button.
  */
 @Composable
-private fun CodeBlockButtonsRow(codeBlocks: List<CodeBlockInfo>) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 4.dp),
-    ) {
-        codeBlocks.forEachIndexed { index, block ->
-            CodeBlockChip(block = block, index = index)
-            if (index < codeBlocks.size - 1) {
-                Spacer(modifier = Modifier.width(6.dp))
+private fun SegmentedTimelineView(
+    segments: List<Segment>,
+    modifier: Modifier,
+) {
+    Column(modifier = modifier) {
+        for (segment in segments) {
+            when (segment) {
+                is Segment.Text -> {
+                    if (segment.body.isNotBlank()) {
+                        Text(
+                            text = segment.body,
+                            style = LocalTextStyle.current,
+                            color = LocalContentColor.current,
+                        )
+                    }
+                }
+                is Segment.Code -> {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    CodeBlockWidget(
+                        codeText = segment.body,
+                        language = segment.language,
+                    )
+                }
             }
         }
     }
 }
 
+// ─── Code Block Widget ──────────────────────────────────────────────
+
 @Composable
-private fun CodeBlockChip(block: CodeBlockInfo, index: Int) {
+private fun CodeBlockWidget(
+    codeText: String,
+    language: String,
+) {
     val context = LocalContext.current
     var copied by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(8.dp)
 
-    val label = if (block.language.isNotEmpty()) {
-        block.language
-    } else {
-        "代码"
-    }
-
-    Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = ElementTheme.colors.bgSubtleSecondary,
+    Column(
         modifier = Modifier
-            .sizeIn(maxWidth = 120.dp)
-            .clickable {
-                copyToClipboard(context, block.text)
-                copied = true
-            },
+            .fillMaxWidth()
+            .clip(shape)
+            .background(ElementTheme.colors.bgSubtleSecondary)
     ) {
+        // Header bar: language tag + copy button
         Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
         ) {
-            Icon(
-                imageVector = if (copied) CompoundIcons.Check() else CompoundIcons.Copy(),
-                contentDescription = null,
-                tint = ElementTheme.colors.textSecondary,
-                modifier = Modifier.size(14.dp),
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = label,
-                style = ElementTheme.typography.fontBodySmRegular,
-                color = ElementTheme.colors.textSecondary,
-                maxLines = 1,
-            )
+            if (language.isNotEmpty()) {
+                Text(
+                    text = language,
+                    style = ElementTheme.typography.fontBodySmRegular,
+                    color = ElementTheme.colors.textSecondary,
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            IconButton(
+                onClick = {
+                    copyToClipboard(context, codeText)
+                    copied = true
+                },
+                modifier = Modifier.size(28.dp),
+            ) {
+                Icon(
+                    imageVector = if (copied) CompoundIcons.Check() else CompoundIcons.Copy(),
+                    contentDescription = if (copied) "已复制" else "复制代码",
+                    tint = ElementTheme.colors.textSecondary,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
         }
+        // Code body
+        Text(
+            text = codeText,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            lineHeight = 20.sp,
+            color = ElementTheme.colors.textPrimary,
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        )
     }
 }
 
-/**
- * Extracts code block text + language from the HTML document.
- * Preserves whitespace and line breaks via html() instead of text().
- */
-@VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+// ─── Utilities ──────────────────────────────────────────────────────
+
+private data class CodeBlockInfo(
+    val text: String,
+    val language: String,
+)
+
+@VisibleForTesting
 internal fun extractCodeBlocks(content: TimelineItemTextBasedContent): List<CodeBlockInfo> {
     val doc = content.htmlDocument ?: return emptyList()
     val codeElements = doc.select("pre > code")
@@ -209,6 +298,8 @@ internal fun getTextWithResolvedMentions(content: TimelineItemTextBasedContent):
     val bodyWithResolvedMentions = mentionSpanUpdater.rememberMentionSpans(content.formattedBody)
     return SpannedString.valueOf(bodyWithResolvedMentions)
 }
+
+// ─── Previews ────────────────────────────────────────────────────────
 
 @PreviewsDayNight
 @Composable
